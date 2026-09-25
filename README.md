@@ -126,6 +126,9 @@ El Deploy Hook es una credencial: cualquiera que tenga esa URL puede lanzar
 despliegues, por eso va como *secret* (GitHub lo oculta en los logs) y nunca
 en el código.
 
+La evidencia de una ejecución completa (capturas y log del despliegue) está en
+[`docs/evidencias/punto-1.2-cicd.md`](docs/evidencias/punto-1.2-cicd.md).
+
 ## 5. Notas para el informe de cierre
 
 - El almacenamiento de usuarios está en memoria para simplificar la entrega
