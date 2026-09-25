@@ -5,6 +5,11 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  # Permite relanzar el pipeline a mano desde la pestaña Actions.
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -12,12 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Clonar repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configurar Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version-file: '.node-version'
           cache: 'npm'
 
       - name: Instalar dependencias
@@ -27,65 +32,92 @@ jobs:
         run: npm run lint
 
       - name: Ejecutar pruebas unitarias con cobertura (mínimo 80%)
-        run: npm test -- --ci --coverageReporters=text-summary --coverageReporters=lcov
+        run: npm test -- --ci --coverageReporters=text --coverageReporters=text-summary --coverageReporters=lcov
 
       - name: Publicar reporte de cobertura
-        uses: actions/upload-artifact@v4
+        if: always()
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage/
 
   build:
-    name: Construcción de la imagen Docker
+    name: Construcción y prueba de la imagen Docker
     needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Clonar repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Construir imagen
         run: docker build -t helpcare-auth-module:${{ github.sha }} .
 
-      - name: Guardar imagen como artefacto
-        run: docker save helpcare-auth-module:${{ github.sha }} -o helpcare-auth-module.tar
-
-      - name: Subir imagen como artefacto
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-image
-          path: helpcare-auth-module.tar
+      # Prueba de humo: la imagen debe arrancar y responder antes de desplegar.
+      - name: Verificar que el contenedor arranca y responde en /health
+        run: |
+          docker run -d --name helpcare-smoke -p 3000:3000 \
+            -e JWT_SECRET=solo_para_prueba_de_ci \
+            helpcare-auth-module:${{ github.sha }}
+          for i in $(seq 1 15); do
+            if curl -fsS http://localhost:3000/health; then
+              echo ""
+              echo "El contenedor responde correctamente"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::El contenedor no respondió en /health"
+          docker logs helpcare-smoke
+          exit 1
 
   deploy:
-    name: Despliegue automático a entorno de prueba
-    needs: build
-    if: github.ref == 'refs/heads/main'
+    name: Despliegue automático a entorno de prueba (Render)
+    needs: [test, build]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: test
+    concurrency:
+      group: deploy-test
+      cancel-in-progress: false
     steps:
-      - name: Descargar imagen
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image
-
-      - name: Cargar imagen Docker
-        run: docker load -i helpcare-auth-module.tar
-
-      - name: Desplegar en el servidor de prueba
+      # El Deploy Hook es una URL privada de Render que, al recibir un POST,
+      # lanza un despliegue del último commit de main. Se guarda como secreto
+      # del repositorio para no exponerla en el código.
+      - name: Disparar el despliegue en Render (Deploy Hook)
         env:
-          TEST_SERVER_HOST: ${{ secrets.TEST_SERVER_HOST }}
-          TEST_SERVER_USER: ${{ secrets.TEST_SERVER_USER }}
-          TEST_SERVER_SSH_KEY: ${{ secrets.TEST_SERVER_SSH_KEY }}
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
         run: |
-          echo "Desplegando helpcare-auth-module:${{ github.sha }} en el entorno de prueba..."
-          # Ejemplo de despliegue remoto vía SSH. Ajustar según el proveedor
-          # real del entorno de prueba (Render, Railway, un EC2/VM propio, etc.):
-          #
-          # echo "$TEST_SERVER_SSH_KEY" > key.pem && chmod 600 key.pem
-          # scp -i key.pem -o StrictHostKeyChecking=no helpcare-auth-module.tar \
-          #   $TEST_SERVER_USER@$TEST_SERVER_HOST:/opt/helpcare/
-          # ssh -i key.pem -o StrictHostKeyChecking=no $TEST_SERVER_USER@$TEST_SERVER_HOST \
-          #   "docker load -i /opt/helpcare/helpcare-auth-module.tar && \
-          #    docker rm -f helpcare-auth || true && \
-          #    docker run -d --name helpcare-auth -p 3000:3000 --env-file /opt/helpcare/.env \
-          #    helpcare-auth-module:${{ github.sha }}"
-          echo "Despliegue completado"
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "::error::Falta el secreto RENDER_DEPLOY_HOOK (Settings > Secrets and variables > Actions > Secrets)"
+            exit 1
+          fi
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
+          echo ""
+          echo "Render aceptó la solicitud de despliegue del commit $GITHUB_SHA"
+
+      # Render expone el commit desplegado en RENDER_GIT_COMMIT y la app lo
+      # devuelve en /health; así se comprueba que ya corre la versión nueva.
+      - name: Esperar a que Render sirva la nueva versión (/health)
+        env:
+          RENDER_SERVICE_URL: ${{ vars.RENDER_SERVICE_URL }}
+        run: |
+          if [ -z "$RENDER_SERVICE_URL" ]; then
+            echo "::error::Falta la variable RENDER_SERVICE_URL (Settings > Secrets and variables > Actions > Variables)"
+            exit 1
+          fi
+          URL="${RENDER_SERVICE_URL%/}/health"
+          echo "Esperando a que $URL responda con el commit $GITHUB_SHA"
+          for i in $(seq 1 60); do
+            BODY=$(curl -s --max-time 60 "$URL" || true)
+            echo "[intento $i] $BODY"
+            case "$BODY" in
+              *"\"commit\":\"$GITHUB_SHA\""*)
+                echo "Despliegue verificado: el entorno de prueba ya sirve el commit $GITHUB_SHA"
+                exit 0
+                ;;
+            esac
+            sleep 15
+          done
+          echo "::error::Render no llegó a servir el commit $GITHUB_SHA a tiempo"
+          exit 1

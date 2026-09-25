@@ -6,7 +6,11 @@ function crearApp() {
   const app = express();
   app.use(express.json());
 
-  app.get('/health', (req, res) => res.json({ status: 'ok' }));
+  // RENDER_GIT_COMMIT lo define Render en cada despliegue; el pipeline lo usa
+  // para confirmar que el entorno de prueba ya sirve la versión nueva.
+  app.get('/health', (req, res) =>
+    res.json({ status: 'ok', commit: process.env.RENDER_GIT_COMMIT || 'local' })
+  );
 
   app.use('/api/auth', authRoutes);
   app.use('/api/donantes', donantesRoutes);

@@ -23,6 +23,7 @@ helpcare-auth-module/
 ├── tests/                      # Pruebas unitarias (Jest + Supertest)
 ├── .github/workflows/ci-cd.yml # Pipeline de CI/CD (GitHub Actions)
 ├── Dockerfile
+├── .node-version               # Versión de Node (CI, Docker y Render usan la misma)
 ├── .env.example
 └── package.json
 ```
@@ -71,8 +72,8 @@ de `src/`, cumpliendo el umbral de cobertura del 80% configurado en
 `package.json` (`coverageThreshold`). Al ejecutar `npm test`, Jest falla el
 build si la cobertura cae por debajo de ese umbral.
 
-**Para correrlo localmente** (requiere Node.js 20+ y conexión a internet para
-instalar dependencias):
+**Para correrlo localmente** (requiere Node.js 24 LTS, la versión fijada en
+`.node-version`, y conexión a internet para instalar dependencias):
 
 ```bash
 npm install
@@ -86,20 +87,44 @@ npm start          # levanta el servidor en http://localhost:3000
 El archivo `.github/workflows/ci-cd.yml` define tres jobs encadenados:
 
 1. **test** — en cada push/PR: instala dependencias, corre `eslint` y ejecuta
-   `npm test` con cobertura; publica el reporte como artefacto.
-2. **build** — si las pruebas pasan: construye la imagen Docker del servicio
-   y la guarda como artefacto (`.tar`).
-3. **deploy** — solo en la rama `main`: descarga la imagen y la despliega en
-   el entorno de prueba (el paso de despliegue remoto está comentado como
-   plantilla, ya que depende del proveedor final: Render, Railway, un VM/EC2
-   propio, etc.). Usa un *environment* de GitHub (`test`) para poder exigir
-   revisión manual y guardar los secretos de conexión
-   (`TEST_SERVER_HOST`, `TEST_SERVER_USER`, `TEST_SERVER_SSH_KEY`).
+   `npm test` con cobertura; publica el reporte como artefacto
+   (`coverage-report`).
+2. **build** — si las pruebas pasan: construye la imagen Docker del servicio,
+   la arranca y comprueba que responde en `/health` (prueba de humo).
+3. **deploy** — solo en la rama `main` y solo si `test` y `build` pasaron:
+   llama al *Deploy Hook* de Render para desplegar el último commit en el
+   entorno de prueba y espera hasta que `GET /health` responda con ese mismo
+   commit, de modo que el job solo termina en verde si el despliegue quedó
+   realmente activo.
 
 Esto cumple el requisito de integración y entrega continua: cada cambio se
-prueba automáticamente, y si todo pasa, se construye y despliega sin
-intervención manual (excepto la aprobación del *environment*, si se
-configura).
+prueba automáticamente y, si todo pasa, se construye y despliega sin
+intervención manual.
+
+### Entorno de prueba en Render
+
+- **Servicio:** *Web Service* de Render conectado a este repositorio, rama
+  `main`, runtime Node, `Build Command: npm install`,
+  `Start Command: npm start`, plan gratuito. La versión de Node se toma de
+  `.node-version`.
+- **Auto-Deploy:** desactivado (`Off`), para que el único que despliega sea
+  el pipeline y nunca llegue al entorno un commit que no pasó las pruebas.
+- **Variables de entorno en Render:** `JWT_SECRET` con un valor largo y
+  aleatorio (si falta, la app usa un secreto de desarrollo inseguro).
+  `PORT` y `RENDER_GIT_COMMIT` los define Render automáticamente.
+
+### Configuración necesaria en GitHub
+
+En *Settings → Secrets and variables → Actions*:
+
+| Tipo      | Nombre                | Valor                                                        |
+|-----------|-----------------------|--------------------------------------------------------------|
+| Secret    | `RENDER_DEPLOY_HOOK`  | URL del Deploy Hook (Render → servicio → Settings → Deploy Hook) |
+| Variable  | `RENDER_SERVICE_URL`  | URL pública del servicio, p. ej. `https://helpcare-auth-module.onrender.com` |
+
+El Deploy Hook es una credencial: cualquiera que tenga esa URL puede lanzar
+despliegues, por eso va como *secret* (GitHub lo oculta en los logs) y nunca
+en el código.
 
 ## 5. Notas para el informe de cierre
 
