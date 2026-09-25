@@ -1,0 +1,91 @@
+name: CI/CD - HelpCare Auth Module
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Pruebas unitarias y cobertura
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar linter
+        run: npm run lint
+
+      - name: Ejecutar pruebas unitarias con cobertura (mínimo 80%)
+        run: npm test -- --ci --coverageReporters=text-summary --coverageReporters=lcov
+
+      - name: Publicar reporte de cobertura
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+  build:
+    name: Construcción de la imagen Docker
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Construir imagen
+        run: docker build -t helpcare-auth-module:${{ github.sha }} .
+
+      - name: Guardar imagen como artefacto
+        run: docker save helpcare-auth-module:${{ github.sha }} -o helpcare-auth-module.tar
+
+      - name: Subir imagen como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: helpcare-auth-module.tar
+
+  deploy:
+    name: Despliegue automático a entorno de prueba
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - name: Descargar imagen
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Cargar imagen Docker
+        run: docker load -i helpcare-auth-module.tar
+
+      - name: Desplegar en el servidor de prueba
+        env:
+          TEST_SERVER_HOST: ${{ secrets.TEST_SERVER_HOST }}
+          TEST_SERVER_USER: ${{ secrets.TEST_SERVER_USER }}
+          TEST_SERVER_SSH_KEY: ${{ secrets.TEST_SERVER_SSH_KEY }}
+        run: |
+          echo "Desplegando helpcare-auth-module:${{ github.sha }} en el entorno de prueba..."
+          # Ejemplo de despliegue remoto vía SSH. Ajustar según el proveedor
+          # real del entorno de prueba (Render, Railway, un EC2/VM propio, etc.):
+          #
+          # echo "$TEST_SERVER_SSH_KEY" > key.pem && chmod 600 key.pem
+          # scp -i key.pem -o StrictHostKeyChecking=no helpcare-auth-module.tar \
+          #   $TEST_SERVER_USER@$TEST_SERVER_HOST:/opt/helpcare/
+          # ssh -i key.pem -o StrictHostKeyChecking=no $TEST_SERVER_USER@$TEST_SERVER_HOST \
+          #   "docker load -i /opt/helpcare/helpcare-auth-module.tar && \
+          #    docker rm -f helpcare-auth || true && \
+          #    docker run -d --name helpcare-auth -p 3000:3000 --env-file /opt/helpcare/.env \
+          #    helpcare-auth-module:${{ github.sha }}"
+          echo "Despliegue completado"
